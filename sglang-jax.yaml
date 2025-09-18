@@ -1,0 +1,10 @@
+resources:
+   accelerators: tpu-v6e-1
+   accelerator_args:
+      tpu_vm: True
+      runtime_version: v2-alpha-tpuv6e
+setup: |
+ 	git clone https://github.com/sgl-project/sglang-jax
+run: |
+  cd sglang-jax
+  pip install -e "python[all]"
