@@ -8,6 +8,7 @@ import numpy as np
 from sgl_jax.srt.layers.gmm.megablox_gmm_backend import gmm
 
 v6e_tflops = 926
+PROFILE = True
 
 def gmm_flops(group_sizes: jnp.ndarray, k: int, n: int):
   m = int(group_sizes.sum())
@@ -18,7 +19,6 @@ def create_gmm_test_data(
     k: int,
     n: int,
     num_groups: int,
-    group_sizes: jnp.ndarray,
     dtype: jnp.dtype = jnp.bfloat16,
     seed: int = 42,
 ):
@@ -46,7 +46,7 @@ def benchmark_backend(
     """Benchmark megablox gmm with given parameters."""
 
     if backend_type == "megablox":
-        lhs, rhs = create_gmm_test_data(m, k, n, num_groups, group_sizes, dtype)
+        lhs, rhs = create_gmm_test_data(m, k, n, num_groups, dtype)
 
         @functools.partial(
             jax.jit,
@@ -128,13 +128,12 @@ def main():
     k_config = [hidden_size]
     n_config = [intermediate_dim]
     num_groups_config = [num_experts]
-    group_size_config = [int(batch_size * seq_len * num_experts_per_tok / num_experts)]
+    # group_size_config = [int(batch_size * seq_len * num_experts_per_tok / num_experts)]
     
     print("MEGABLOX GMM BENCHMARK RESULTS SUMMARY")
     print("=" * 80)
 
     results = []
-    config_count = 0
     valid_config_count = 0
 
     # Base ranges for tiling auto-tuning (BM, BK, BN)
@@ -142,72 +141,74 @@ def main():
     base_tk = [768, 896, 1024, 1152, 1280, 1408, 1536]
     base_tn = [384, 512, 640]
 
+    # best config
+    base_tm = [2048]
+    base_tk = [1024]
+    base_tn = [512]
+
     for m in m_config:
         for k in k_config:
             for n in n_config:
                 for num_groups in num_groups_config:
-                    for group_size in group_size_config:
-                        config_count += 1
+                    valid_config_count += 1
+                    group_sizes = create_uniform_group_sizes(
+                        num_groups, m // num_groups
+                    )
 
-                        valid_config_count += 1
-                        group_sizes = create_uniform_group_sizes(
-                            num_groups, m // num_groups
-                        )
+                    print(
+                        f"Config {valid_config_count}: m={m}, k={k}, n={n}, groups={num_groups}, group_size={m//num_groups}"
+                    )
 
-                        print(
-                            f"Config {valid_config_count}: m={m}, k={k}, n={n}, groups={num_groups}, group_size={m//num_groups}"
-                        )
+                    try:
+                        # Build tiling candidates for this config using the provided bases
+                        # Filter by simple constraints to avoid obviously invalid tiles
+                        tiling_candidates: list[tuple[int, int, int]] = [
+                            (tm, tk, tn)
+                            for tm in base_tm
+                            for tk in base_tk
+                            for tn in base_tn
+                            if tk <= k and tn <= n and tm <= m
+                        ]
 
-                        try:
-                            # Build tiling candidates for this config using the provided bases
-                            # Filter by simple constraints to avoid obviously invalid tiles
-                            tiling_candidates: list[tuple[int, int, int]] = [
-                                (tm, tk, tn)
-                                for tm in base_tm
-                                for tk in base_tk
-                                for tn in base_tn
-                                if tk <= k and tn <= n and tm <= m
-                            ]
+                        best = None  # (tflops, util, time_s, tiling)
+                        for tiling in tiling_candidates:
+                            megablox_time = benchmark_backend(
+                                m,
+                                k,
+                                n,
+                                num_groups,
+                                group_sizes,
+                                backend_type="megablox",
+                                tiling=tiling,
+                            )
 
-                            best = None  # (tflops, util, time_s, tiling)
-                            for tiling in tiling_candidates:
-                                megablox_time = benchmark_backend(
-                                    m,
-                                    k,
-                                    n,
-                                    num_groups,
-                                    group_sizes,
-                                    backend_type="megablox",
-                                    tiling=tiling,
-                                )
+                            tflops = gmm_flops(group_sizes, k, n) / megablox_time * 1e-12
+                            tflops_utilization = tflops / v6e_tflops * 100
+                            print(f"  Tiling {tiling}: {tflops:.2f} TFLOPS ({tflops_utilization:.2f}% util), {megablox_time * 1000:.2f} ms")
 
-                                tflops = gmm_flops(group_sizes, k, n) / megablox_time * 1e-12
-                                tflops_utilization = tflops / v6e_tflops * 100
-                                print(f"  Tiling {tiling}: {tflops:.2f} TFLOPS ({tflops_utilization:.2f}% util), {megablox_time * 1000:.2f} ms")
+                            if best is None or tflops > best[0]:
+                                best = (tflops, tflops_utilization, megablox_time, tiling)
 
-                                if best is None or tflops > best[0]:
-                                    best = (tflops, tflops_utilization, megablox_time, tiling)
+                        if best is not None:
+                            print(f"=> Best tiling: {best[3]} | {best[0]:.2f} TFLOPS ({best[1]:.2f}% util), {best[2] * 1000:.2f} ms")
+                            results.append(
+                                {
+                                    "config": f"M{m}_K{k}_N{n}_G{num_groups}",
+                                    "TFLOPS": best[0],
+                                    "TFLOPS utilization": best[1],
+                                    "m": m,
+                                    "k": k,
+                                    "n": n,
+                                    "num_groups": num_groups,
+                                    "tiling": best[3],
+                                    "time_ms": best[2] * 1000.0,
+                                }
+                            )
 
-                            if best is not None:
-                                print(f"=> Best tiling: {best[3]} | {best[0]:.2f} TFLOPS ({best[1]:.2f}% util), {best[2] * 1000:.2f} ms")
-                                results.append(
-                                    {
-                                        "config": f"M{m}_K{k}_N{n}_G{num_groups}",
-                                        "TFLOPS": best[0],
-                                        "TFLOPS utilization": best[1],
-                                        "m": m,
-                                        "k": k,
-                                        "n": n,
-                                        "num_groups": num_groups,
-                                        "tiling": best[3],
-                                        "time_ms": best[2] * 1000.0,
-                                    }
-                                )
+                    except Exception as e:
+                        print(f"  ERROR: {e}")
 
-                        except Exception as e:
-                            print(f"  ERROR: {e}")
-
-                        print()
+                    print()
 
     print("=" * 80)
     print("SUMMARY OF ALL RESULTS")
@@ -238,6 +239,30 @@ def main():
             f"Speedup ratio (TFLOPS): {best_config['TFLOPS'] / max(worst_config['TFLOPS'], 1e-9):.2f}x"
         )
 
+        if PROFILE:
+            options = jax.profiler.ProfileOptions()
+            options.advanced_configuration = {"tpu_trace_mode": "TRACE_COMPUTE"}
+            with jax.profiler.trace("/tmp/profile-data", profiler_options=options):  # create_perfetto_link=True
+                parts = best_config['config'].split("_")
+                m = int(parts[0][1:])
+                k = int(parts[1][1:])
+                n = int(parts[2][1:])
+                num_groups = best_config['num_groups']
+                group_sizes = create_uniform_group_sizes(num_groups, m // num_groups)
+                tiling = best_config['tiling']
+                megablox_time = benchmark_backend(
+                    m,
+                    k,
+                    n,
+                    num_groups,
+                    group_sizes,
+                    backend_type="megablox",
+                    tiling=tiling,
+                )
+
+                tflops = gmm_flops(group_sizes, k, n) / megablox_time * 1e-12
+                tflops_utilization = tflops / v6e_tflops * 100
+                print(f"  Tiling {tiling}: {tflops:.2f} TFLOPS ({tflops_utilization:.2f}% util), {megablox_time * 1000:.2f} ms")
 
 if __name__ == "__main__":
     main()
