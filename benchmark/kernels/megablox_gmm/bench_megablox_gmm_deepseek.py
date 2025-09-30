@@ -118,14 +118,14 @@ def main():
 
     # Config of DeepSeek-V3-671B
     batch_size = 16
-    seq_len = 1024
+    seq_len = 4096
     num_experts_per_tok = 8
     num_experts = 256
-    mlp_dim = 18432
+    hidden_size = 7168
     intermediate_dim = 2048
 
     m_config = [int(batch_size * seq_len * num_experts_per_tok)]
-    k_config = [mlp_dim]
+    k_config = [hidden_size]
     n_config = [intermediate_dim]
     num_groups_config = [num_experts]
     group_size_config = [int(batch_size * seq_len * num_experts_per_tok / num_experts)]
@@ -138,7 +138,7 @@ def main():
     valid_config_count = 0
 
     # Base ranges for tiling auto-tuning (BM, BK, BN)
-    base_tm = [128, 256, 512, 1024]
+    base_tm = [256, 512, 1024, 2048]
     base_tk = [768, 896, 1024, 1152, 1280, 1408, 1536]
     base_tn = [384, 512, 640]
 
