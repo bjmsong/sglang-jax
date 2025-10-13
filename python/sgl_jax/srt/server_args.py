@@ -35,6 +35,7 @@ class ServerArgs:
     is_embedding: bool = False
     revision: Optional[str] = None
     model_impl: str = "auto"
+    model_layer_nums: Optional[int] = None
 
     # HTTP server
     host: str = "127.0.0.1"
@@ -129,6 +130,9 @@ class ServerArgs:
 
     disable_jax_precompile: bool = False
 
+    # For deterministic sampling
+    enable_deterministic_sampling: bool = False
+
     def __post_init__(self):
         # Set missing default values
         if self.tokenizer_path is None:
@@ -181,6 +185,10 @@ class ServerArgs:
                     "Disabling chunked prefill."
                 )
                 self.chunked_prefill_size = -1
+
+        os.environ["SGLANG_ENABLE_DETERMINISTIC_SAMPLING"] = (
+            "1" if self.enable_deterministic_sampling else "0"
+        )
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -287,6 +295,12 @@ class ServerArgs:
             '* "sglang" will use the SGLang model implementation.\n'
             '* "transformers" will use the Transformers model '
             "implementation.\n",
+        )
+        parser.add_argument(
+            "--model-layer-nums",
+            type=int,
+            default=ServerArgs.model_layer_nums,
+            help="Number of model layers to load and use for inference. If not specified, uses the value from model config.",
         )
 
         # HTTP server
@@ -748,6 +762,13 @@ class ServerArgs:
             ],
             default=ServerArgs.attention_backend,
             help="Choose the kernels for attention layers.",
+        )
+
+        # For deterministic sampling
+        parser.add_argument(
+            "--enable-deterministic-sampling",
+            action="store_true",
+            help="Enable deterministic sampling",
         )
 
     @classmethod

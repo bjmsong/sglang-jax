@@ -17,7 +17,11 @@ from sgl_jax.srt.configs.load_config import LoadConfig, LoadFormat
 from sgl_jax.srt.configs.model_config import AttentionArch, MockModelConfig, ModelConfig
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessorOutput
 from sgl_jax.srt.layers.sampler import Sampler
-from sgl_jax.srt.managers.schedule_batch import ModelWorkerBatch
+from sgl_jax.srt.managers.schedule_batch import (
+    GLOBAL_SERVER_ARGS_KEYS,
+    ModelWorkerBatch,
+    global_server_args_dict,
+)
 from sgl_jax.srt.mem_cache.allocator import (
     BaseTokenToKVPoolAllocator,
     PagedTokenToKVPoolAllocator,
@@ -69,7 +73,9 @@ class ModelRunner:
         self.mesh = mesh
         # model args
         self.num_attn_heads = model_config.num_attention_heads
-        self.num_kv_heads = model_config.num_key_value_heads
+        self.num_kv_heads = model_config.get_total_num_kv_heads_with_replication(
+            tp_size
+        )
         self.rngs = rngs
 
         self.tp_size = tp_size
@@ -81,6 +87,12 @@ class ModelRunner:
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
 
         self.forward_pass_id = 0
+
+        # Global vars
+        global_server_args_dict.update(
+            {k: getattr(server_args, k) for k in GLOBAL_SERVER_ARGS_KEYS}
+        )
+
         self.model_loader = JAXModelLoader(
             load_config=LoadConfig(
                 load_format=LoadFormat.JAX, download_dir=server_args.download_dir
@@ -180,6 +192,10 @@ class ModelRunner:
         return min_available_device_memory
 
     def load_model(self):
+        self.model_config.validate_tensor_parallel_config(self.tp_size)
+        self.model_config.configure_for_tensor_parallel(self.tp_size)
+        self.model_config.log_kv_heads_info(self.tp_size)
+
         self.model = self.model_loader.load_model(
             model_config=self.model_config,
         )
@@ -303,7 +319,9 @@ class ModelRunner:
             size=self.max_total_num_tokens,
             page_size=self.page_size,
             dtype=self.kv_cache_dtype,
-            head_num=self.model_config.get_total_num_kv_heads(),
+            head_num=self.model_config.get_total_num_kv_heads_with_replication(
+                self.tp_size
+            ),
             head_dim=self.model_config.head_dim,
             layer_num=self.model_config.num_hidden_layers,
             mesh=self.mesh,
@@ -331,11 +349,18 @@ class ModelRunner:
         self.attn_backend = self._get_attention_backend()
 
     def _get_attention_backend(self):
-        if self.server_args.attention_backend == "native":
+        # Fallback on CPU: FlashAttention (Pallas/Triton) does not support CPU compilation and execution
+        backend = self.server_args.attention_backend
+        if self.server_args.device == "cpu" and backend == "fa":
+            logger.warning(
+                "FlashAttention backend is not supported on CPU; falling back to native."
+            )
+            backend = "native"
+        if backend == "native":
             from sgl_jax.srt.layers.attention.native_backend import NativeAttention
 
             return NativeAttention(self.num_attn_heads, self.num_kv_heads)
-        elif self.server_args.attention_backend == "fa":
+        elif backend == "fa":
             from sgl_jax.srt.layers.attention.flashattention_backend import (
                 FlashAttention,
             )
@@ -345,6 +370,7 @@ class ModelRunner:
                 self.num_kv_heads,
                 self.model_config.head_dim,
                 page_size=self.page_size,
+                mesh=self.mesh,
             )
         else:
             raise ValueError(
@@ -397,7 +423,7 @@ class ModelRunner:
     ) -> Tuple[LogitsProcessorOutput, int]:
         # for compatibility, 0.6.3 need to use use_mesh. set_mesh is not have __entry__ attribute.
         # on jax 0.7.1, we need to use set_mesh.
-        # with self.mesh, jax.sharding.set_mesh(self.mesh):
+        # with jax.sharding.set_mesh(self.mesh):
         with jax.sharding.use_mesh(self.mesh):
             if (
                 forward_batch.forward_mode.is_decode()
@@ -422,19 +448,21 @@ class ModelRunner:
         self,
         logits_output: LogitsProcessorOutput,
         sampling_metadata: SamplingMetadata,
+        positions: jax.Array,
     ) -> jax.Array:
         """Sample and compute logprobs and update logits_output.
 
         Args:
             logits_output: The logits output from the model forward
             forward_batch: The forward batch that generates logits_output
-
+            positions: The positions of the tokens in the sequence.
         Returns:
             A list of next_token_ids
         """
         return self.jitted_sampler(
             logits_output,
             sampling_metadata,
+            positions,
         )
 
 
@@ -446,24 +474,31 @@ class MockModelRunner(ModelRunner):
         mesh: mesh_lib.Mesh = None,
         server_args: ServerArgs = None,
     ):
+        self.server_args = server_args
+        self.tp_size = server_args.tp_size
+
         if isinstance(model_config, MockModelConfig):
             self.num_kv_heads = model_config.num_kv_heads
             self.num_attn_heads = model_config.num_heads
             self.rngs = rngs
         else:
-            self.num_kv_heads = model_config.num_key_value_heads
+            self.num_kv_heads = model_config.get_total_num_kv_heads_with_replication(
+                self.tp_size
+            )
             self.num_attn_heads = model_config.num_attention_heads
             self.rngs = rngs
 
-        self.server_args = server_args
         self.dtype = jnp.float32
         self.mem_fraction_static = 0.8
         self.model_config = model_config
         self.max_total_num_tokens = 1 << 15
         self.kv_cache_dtype = jnp.bfloat16
         self.page_size = 1
-        self.tp_size = server_args.tp_size
         self.mesh = mesh
+
+        # Validate tensor parallel configuration for MockModelRunner too
+        if not isinstance(model_config, MockModelConfig):
+            self.model_config.validate_tensor_parallel_config(self.tp_size)
 
         # If it is a draft model, tp_group can be different
         max_num_reqs = min(
@@ -483,7 +518,9 @@ class MockModelRunner(ModelRunner):
             size=self.max_total_num_tokens,
             page_size=self.page_size,
             dtype=self.kv_cache_dtype,
-            head_num=self.model_config.get_num_kv_heads(self.tp_size),
+            head_num=self.model_config.get_total_num_kv_heads_with_replication(
+                self.tp_size
+            ),
             head_dim=self.model_config.head_dim,
             layer_num=self.model_config.num_hidden_layers,
             mesh=mesh,

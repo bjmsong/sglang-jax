@@ -229,7 +229,11 @@ def create_test_data(
 
     # init attention backend
     attention_backend = FlashAttention(
-        num_heads, num_kv_heads, head_dim, page_size=page_size
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        page_size=page_size,
+        mesh=mesh,
     )
     forward_mode = ForwardMode.EXTEND if mode == "prefill" else ForwardMode.DECODE
 
@@ -271,9 +275,7 @@ def create_test_data(
         extend_prefix_lens=extend_prefix_lens,
         extend_seq_lens=extend_seq_lens,
     )
-    fb.attn_backend.forward_metadata = attention_backend.get_forward_metadata(
-        mwb, mesh=mesh
-    )
+    fb.attn_backend.forward_metadata = attention_backend.get_forward_metadata(mwb)
     return fb, q, k, v
 
 
@@ -384,7 +386,7 @@ class TestAttention(CustomTestCase):
             return out
 
         # run
-        jax_output, _, _ = jit_attn(q_shard, extend_k, extend_v, forward_batch)
+        jax_output, _ = jit_attn(q_shard, extend_k, extend_v, forward_batch)
         jax.block_until_ready(jax_output)
 
         rtol = 2e-2  # Relative tolerance
