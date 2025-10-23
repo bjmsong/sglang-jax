@@ -3,8 +3,9 @@ resources:
    accelerator_args:
       tpu_vm: True
       runtime_version: v2-alpha-tpuv6e
-setup: |
- 	git clone https://github.com/sgl-project/sglang-jax
 run: |
-  cd sglang-jax
-  pip install -e "python[all]"
+  git clone https://github.com/IS-Model-Framework/sglang-jax.git
+  cd sglang-jax && git fetch origin $REF:$REF && git checkout $REF
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install -e "python[all]"
