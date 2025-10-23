@@ -7,4 +7,4 @@ setup: |
  	git clone https://github.com/sgl-project/sglang-jax
 run: |
   cd sglang-jax
-  pip install -e "python[all]"
+#   pip install -e "python[all]"

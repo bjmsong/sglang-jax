@@ -81,21 +81,28 @@ def benchmark_backend(
     else:
         raise ValueError(f"Invalid backend type: {backend_type}")
 
-    # Benchmark
-    # warm up
-    out = gmm_fn()
-    jax.block_until_ready(out)
+    try:
+        # Benchmark
+        # warm up
+        out = gmm_fn()
+        jax.block_until_ready(out)
 
-    # start benchmark
-    times = []
-    for i in range(3):
-        start = time.perf_counter()
-        output = gmm_fn()
-        jax.block_until_ready(output)
-        times.append(time.perf_counter() - start)
+        # start benchmark
+        times = []
+        for i in range(3):
+            start = time.perf_counter()
+            output = gmm_fn()
+            jax.block_until_ready(output)
+            times.append(time.perf_counter() - start)
 
-    avg_time = np.mean(times)
-    return avg_time
+        avg_time = np.mean(times)
+        return avg_time
+    except Exception as e:
+        if "RESOURCE_EXHAUSTED" in str(e):
+            print(f"  Skipping due to memory error: {e}")
+            return None
+        else:
+            raise e
 
 
 def create_uniform_group_sizes(num_groups: int, group_size: int) -> jnp.ndarray:
@@ -181,6 +188,10 @@ def main():
                                 backend_type="megablox",
                                 tiling=tiling,
                             )
+
+                            if megablox_time is None:
+                                # Skip this tiling configuration due to memory error
+                                continue
 
                             tflops = gmm_flops(group_sizes, k, n) / megablox_time * 1e-12
                             tflops_utilization = tflops / v6e_tflops * 100
