@@ -3,6 +3,7 @@
 import logging
 import os
 from functools import partial
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -174,7 +175,12 @@ class ModelRunner:
                 token_to_kv_pool,
                 logits_metadata,
             )
-
+        self._jitted_run_model_func = jitted_run_model
+        self._model_def = model_def
+        self._model_state_def = model_state_def
+        self._model_state_leaves = model_state_leaves
+        self._hlo_dumped = False  # Flag to dump HLO only once
+        
         self.jitted_run_model = run_model_wrapper
         self.jitted_sampler = partial(
             jitted_sampler, sampler_def, sampler_state_def, sampler_state_leaves, self.mesh
@@ -376,6 +382,33 @@ class ModelRunner:
         forward_batch: ForwardBatch,
         logits_metadata: LogitsMetadata,
     ):
+        # Dump HLO on first forward pass
+        if not self._hlo_dumped:
+            self._hlo_dumped = True
+            try:
+                comp_base: dict[str, str | bool] = {
+                    "xla_dump_hlo_as_text": True,
+                    "xla_dump_hlo_as_dot": True,
+                }
+                compiler_options: dict[str, str | bool] = dict(comp_base)
+                hlo_output_dir = Path("hlo_output")
+                hlo_output_dir.mkdir(exist_ok=True)
+                compiler_options["xla_dump_to"] = str(hlo_output_dir)
+                
+                logger.info(f"Dumping HLO to {hlo_output_dir}...")
+                lowered = self._jitted_run_model_func.lower(
+                    self._model_def,
+                    self._model_state_def,
+                    self._model_state_leaves,
+                    forward_batch,
+                    self.token_to_kv_pool,
+                    logits_metadata,
+                )
+                lowered.compile(compiler_options=compiler_options)
+                logger.info(f"HLO dumped successfully to {hlo_output_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to dump HLO: {e}")
+        
         cache_miss_count = 0
         import jax._src.test_util as jtu
 
