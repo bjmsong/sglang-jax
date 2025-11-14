@@ -95,6 +95,7 @@ class ServerArgs:
     # API related
     api_key: str | None = None
     served_model_name: str | None = None
+    chat_template: Optional[str] = None
     file_storage_path: str = "sglang_storage"
     enable_cache_report: bool = False
     reasoning_parser: str | None = None
@@ -304,6 +305,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.model_layer_nums,
             help="Number of model layers to load and use for inference. If not specified, uses the value from model config.",
+        )
+        parser.add_argument(
+            "--chat-template",
+            type=str,
+            default=ServerArgs.chat_template,
+            help="The buliltin chat template name or the path of the chat template file. This is only used for OpenAI-compatible API server.",
         )
 
         # HTTP server

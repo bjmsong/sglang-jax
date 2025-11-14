@@ -12,8 +12,7 @@ logger = logging.getLogger(__name__)
 
 def generate_chat_conv(
     messages: list[dict[str, Any]],
-    tokenizer: Any = None,
-    chat_template: str | None = None,
+    template_name: str
 ) -> str:
     """
     Generate a conversation from chat messages.
@@ -86,3 +85,21 @@ def get_conv_template_by_model_path(model_path):
         if conv_name is not None:
             return conv_name
     return None
+
+def chat_template_exists(template_name: str) -> bool:
+    return template_name in chat_templates
+    
+# Reference: https://huggingface.co/docs/transformers/main/model_doc/qwen2_vl#usage-example
+register_conv_template(
+    Conversation(
+        name="qwen2-vl",
+        system_message="You are a helpful assistant.",
+        system_template="<|im_start|>system\n{system_message}",
+        roles=("<|im_start|>user", "<|im_start|>assistant"),
+        sep="<|im_end|>\n",
+        sep_style=SeparatorStyle.ADD_NEW_LINE_SINGLE,
+        stop_str=["<|im_end|>"],
+        image_token="<|vision_start|><|image_pad|><|vision_end|>",
+        video_token="<|vision_start|><|video_pad|><|vision_end|>",
+    )
+)
